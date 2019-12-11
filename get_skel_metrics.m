@@ -52,9 +52,9 @@ function [metric_nodes, metric_edges, metric_total_length, metric_paths, metric_
     disp(A)
     for i = 1: size(A, 1)
         if sum(A(i, :)) == 1
-            metric_ip = metric_ip + 1;
-        else
             metric_ep = metric_ep + 1;
+        else
+            metric_ip = metric_ip + 1;
         end
     end
 end
