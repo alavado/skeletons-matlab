@@ -1,0 +1,305 @@
+% Returns the adjacency matrix of a 3D, thin 26-connected skeleton.
+% Nodes are branching and end points.
+% Edges are internal points paths connecting nodes.
+% input: binary skeleton.
+% outputs:
+%   A: adjacency matrix,
+%   paths: paths list as cell array,
+%   angles: angles list as doubles array,
+%   main_lengths: primary, secondary and tertiary lengths as doubles array.
+function [A, paths, angles, main_lengths] = get_adjacency_matrix3D(skel, first_node)
+    
+    % To avoid boundary conditions.
+    skel = padarray(skel, [1, 1, 1]);
+    
+    % Our multi-purpose stack and DFS matrix.
+    stack = Stack();
+    discovered = zeros(size(skel));
+    
+    % How many neighbors each voxel has.
+    neighbor_count = zeros(size(skel));
+
+    % Node detection. Each node is labeled with a number.
+    node_labels = zeros(size(skel));
+    node_index = 1;
+    node_indices = zeros(1, 3);
+    for i = 2: size(skel, 1) - 1
+        for j = 2: size(skel, 2) - 1
+            for k = 2: size(skel, 3) - 1
+                if ~skel(i, j, k) || discovered(i, j, k)
+                    continue;
+                end
+                
+                % This voxel's 26-neighborhood.
+                N = skel(i - 1: i + 1, j - 1: j + 1, k - 1: k + 1);
+                neighbor_count(i, j, k) = nnz(N) - 1;
+                
+                % One neighbor => end point.
+                if neighbor_count(i, j, k) == 1
+                    node_labels(i, j, k) = node_index;
+                    
+                    % Update node index.
+                    node_indices(node_index, :) = [i, j, k];
+                    node_index = node_index + 1;
+                
+                % More than 2 neighbors => branching point.
+                elseif neighbor_count(i, j, k) > 2
+                    
+                    % As branch intersections may be busy, we
+                    % regard the full component of branching points
+                    % as a single node.
+                    stack.push([i, j, k]);
+                    
+                    % Regard this node's indices in the volume as
+                    % the innermost voxel in the connected component.
+                    max_neighbors = neighbor_count(i, j, k);
+                    node_indices(node_index, :) = [i, j, k];
+                    
+                    while stack.size() > 0
+                        
+                        % Pop voxel from the stack.
+                        sp = stack.pop();
+                        si = sp(1);
+                        sj = sp(2);
+                        sk = sp(3);
+                        
+                        % Mark this voxel with current node index. 
+                        node_labels(si, sj, sk) = node_index;
+                        discovered(si, sj, sk) = 1;
+                        
+                        % Check neighborhood and continue DFS.
+                        for ni = si - 1: si + 1
+                            for nj = sj - 1: sj + 1
+                                for nk = sk - 1: sk + 1
+                                    if ~skel(ni, nj, nk) || ...
+                                       discovered(ni, nj, nk)
+                                        continue;
+                                    end
+
+                                    % Push undiscovered branching point.
+                                    N = skel(ni - 1: ni + 1, ...
+                                             nj - 1: nj + 1, ...
+                                             nk - 1: nk + 1);
+                                    neighbor_count(ni, nj, nk) = nnz(N) - 1;
+                                    if neighbor_count(ni, nj, nk) > max_neighbors
+                                        max_neighbors = neighbor_count(ni, nj, nk);
+                                        node_indices(node_index, :) = [ni, nj, nk];
+                                    end
+                                    if neighbor_count(ni, nj, nk) > 2 
+                                        stack.push([ni, nj, nk]);
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    node_index = node_index + 1;
+                end
+            end
+        end
+    end
+    
+    % We now know the adjacency matrix's size.
+    total_nodes = node_index - 1;
+    A = zeros(total_nodes, total_nodes);
+    
+    % A stack for keeping track of branching points as we traverse.
+    branch_stack = Stack();
+    
+    % Reset discovery marks.
+    discovered = zeros(size(skel));
+    
+    % Pseudo-euclidean 26-neighborhood distances.
+    dist = sqrt(cat(3, ...
+        [3 2 3; 2 1 2; 3 2 3], ...
+        [2 1 2; 1 0 1; 2 1 2], ...
+        [3 2 3; 2 1 2; 3 2 3]));
+    
+    dist = zeros(3, 3, 3);
+    dist(:, :, 1) = sqrt([11 10 11; 10 9 10; 11 10 11]);
+    dist(:, :, 2) = sqrt([2 1 2; 1 0 1; 2 1 2]);
+    dist(:, :, 3) = sqrt([11 10 11; 10 9 10; 11 10 11]);
+    
+    % Paths lengths array.
+    paths = {};
+    path_index = 1;
+    total_length = 0;
+    
+    % On a second scan, we traverse internal points paths.
+    for i = 2: size(skel, 1) - 1
+        for j = 2: size(skel, 2) - 1
+            for k = 2: size(skel, 3) - 1
+                
+                % End and internal points belong to a unique path.
+                % We can't traverse starting from a branching point.
+                if ~skel(i, j, k) || ...
+                   neighbor_count(i, j, k) > 2 || ...
+                   discovered(i, j, k)
+                    continue;
+                end
+
+                % Nodes connected by this path.
+                side1 = 0;
+                side2 = 0;
+                
+                % Coordinates of such nodes.
+                coord1 = zeros(1, 3);
+                coord2 = zeros(1, 3);
+                
+                % Taxicab length of each path.
+                path_length = 0;
+                
+                % We look points across the path until
+                % we find two nodes.
+                stack.push([i, j, k]);
+                while stack.size() > 0
+                    
+                    % Pop voxel from the stack.
+                    sp = stack.pop();
+                    si = sp(1);
+                    sj = sp(2);
+                    sk = sp(3);
+                    discovered(si, sj, sk) = 1;
+                    
+                    % If it's an end or branching point, we found a side.
+                    if neighbor_count(si, sj, sk) == 1 || ...
+                       neighbor_count(si, sj, sk) > 2
+                       if ~side1
+                           side1 = node_labels(si, sj, sk);
+                           coord1 = [si sj sk];
+                       elseif ~side2
+                           side2 = node_labels(si, sj, sk);
+                           coord2 = [si sj sk];
+                       else
+                           disp('Error');
+                       end
+                    end
+                    
+                    % We dont's intend to permanently mark branching points
+                    % as discovered, as they must be rediscovered through
+                    % other paths.
+                    if neighbor_count(si, sj, sk) > 2
+                        branch_stack.push([si, sj, sk]);
+                        discovered(si, sj, sk) = 0;
+                    else
+                    
+                        % Search the neighborhood.
+                        for ni = si - 1: si + 1
+                            for nj = sj - 1: sj + 1
+                                for nk = sk - 1: sk + 1
+                                    if ~skel(ni, nj, nk) || ...
+                                       discovered(ni, nj, nk)
+                                        continue;
+                                    end
+                                    
+                                    % Push undiscovered neighbors.
+                                    stack.push([ni, nj, nk]);
+                                    
+                                    % Add distance.
+                                    d = dist( ...
+                                        ni - si + 2, ...
+                                        nj - sj + 2, ...
+                                        nk - sk + 2);
+                                    path_length = path_length + d;
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                % Clear branching points marking.
+                while branch_stack.size() > 0
+                    sp = branch_stack.pop();
+                    discovered(sp(1), sp(2), sp(3)) = 0;
+                end
+                
+                % Add path to matrix.
+                if side1 > 0 && side2 > 0
+                    A(side1, side2) = A(side1, side2) + 1;
+                    A(side2, side1) = A(side2, side1) + 1;
+                    paths{path_index} = {[side1 side2] coord1 coord2 path_length};
+                    path_index = path_index + 1;
+                    total_length = total_length + path_length;
+                end
+            end
+        end
+    end
+    
+    % Get bifuraction angles if a root is specified.
+    if nargin == 1
+        angles = [];
+        main_lengths = [];
+        return;        
+    end
+    
+    % Visited nodes while traversing the tree.
+    visited_nodes = zeros(1, total_nodes);
+    
+    % Select the first node as the nearest to the root argument.
+    min_dist = Inf;
+    first_node_index = -1;
+    for i = 1: total_nodes
+        node_dist = pdist([node_indices(i,:);first_node]);
+        if node_dist < min_dist
+            first_node_index = i;
+            min_dist = node_dist;
+        end
+    end
+    
+    % Mark the first node as visited.
+    visited_nodes(first_node_index) = 1;
+    
+    % Stack keeps node indices from which angles must be calculated.
+    edges_stack = Stack();
+    
+    % First vector starts from first node.
+    % Look for the other end in the matrix.
+    for i = 1: total_nodes
+        if A(first_node_index, i)
+            
+            % Create a struct for each edge.
+            edge = struct;
+            
+            % Main node is the unvisited side.
+            edge.node_index = i;
+            edge.vector = node_indices(i,:) - node_indices(first_node_index,:);
+            edges_stack.push(edge);
+            break;
+        end
+    end
+    
+    % While there are unvisited edges.
+    angles = [];
+    while edges_stack.size() > 0
+        current_edge = edges_stack.pop();
+        
+        % Mark this edge's main node as visited.
+        visited_nodes(current_edge.node_index) = 1;
+        
+        % Measure angles of adyacent edges.
+        edge_angles = [];
+        for i = 1: total_nodes
+            if A(current_edge.node_index, i) && ~visited_nodes(i)
+                
+                % Calculate the angle.
+                other_vector = node_indices(i,:) - node_indices(current_edge.node_index,:);
+                edge_angles = [edge_angles, ...
+                    acos(dot(other_vector, current_edge.vector) / ...
+                    (norm(other_vector) * norm(current_edge.vector)))];
+                
+                % Push other edge into the stack.
+                edge = struct;
+                edge.node_index = i;
+                edge.vector = other_vector;
+                edges_stack.push(edge);
+            end
+        end
+        
+        % Add angles to list only if there are 2 or more.
+        % This chops out cycles.
+        if numel(edge_angles) > 1
+            angles = [angles, edge_angles];
+        end
+    end
+    angles = rad2deg(angles);
+    main_lengths = [];
+end
